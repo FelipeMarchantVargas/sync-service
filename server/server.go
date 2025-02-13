@@ -12,13 +12,21 @@ import (
 	"time"
 
 	pb "github.com/FelipeMarchantVargas/sync-service/proto"
+	"github.com/FelipeMarchantVargas/sync-service/server/auth"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 const storageDir = "./storage"
 
 type SyncServer struct {
 	pb.UnimplementedSyncServiceServer
+}
+
+type AuthServer struct {
+	pb.UnimplementedAuthServiceServer
 }
 
 func (s *SyncServer) ListFiles(ctx context.Context, req *pb.Empty) (*pb.FileList, error) {
@@ -39,6 +47,9 @@ func (s *SyncServer) ListFiles(ctx context.Context, req *pb.Empty) (*pb.FileList
 }
 
 func (s *SyncServer) UploadFile(stream pb.SyncService_UploadFileServer) error {
+	if err := authenticate(stream.Context()); err != nil {
+		return err
+	}
 	startTime := time.Now()
 	log.Println("[INFO] Cliente inició la subida de un archivo comprimido.")
 
@@ -93,6 +104,9 @@ func (s *SyncServer) UploadFile(stream pb.SyncService_UploadFileServer) error {
 }
 
 func (s *SyncServer) DownloadFile(req *pb.FileRequest, stream pb.SyncService_DownloadFileServer) error {
+	if err := authenticate(stream.Context()); err != nil {
+		return err
+	}
 	startTime := time.Now()
 	filePath := filepath.Join(storageDir, req.Filename)
 
@@ -137,6 +151,40 @@ func (s *SyncServer) DownloadFile(req *pb.FileRequest, stream pb.SyncService_Dow
 	return nil
 }
 
+func (s *AuthServer) Login(ctx context.Context, req *pb.LoginRequest) (*pb.LoginResponse, error) {
+	// ⚠️ En producción, valida con una base de datos
+	if req.Username != "admin" || req.Password != "password" {
+		return nil, status.Errorf(codes.Unauthenticated, "Credenciales incorrectas")
+	}
+
+	token, err := auth.GenerateToken(req.Username)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "Error generando el token")
+	}
+
+	return &pb.LoginResponse{Token: token}, nil
+}
+
+func authenticate(ctx context.Context) error {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return status.Errorf(codes.Unauthenticated, "Falta token de autenticación")
+	}
+
+	tokens := md["authorization"]
+	if len(tokens) == 0 {
+		return status.Errorf(codes.Unauthenticated, "Token no encontrado")
+	}
+
+	token := tokens[0]
+	_, err := auth.ValidateToken(token)
+	if err != nil {
+		return status.Errorf(codes.Unauthenticated, "Token inválido")
+	}
+
+	return nil
+}
+
 
 
 func main() {
@@ -154,6 +202,7 @@ func main() {
 	// Crear el servidor gRPC
 	grpcServer := grpc.NewServer()
 	pb.RegisterSyncServiceServer(grpcServer, &SyncServer{})
+	pb.RegisterAuthServiceServer(grpcServer, &AuthServer{})
 
 	log.Println("Servidor gRPC corriendo en el puerto 50051")
 	if err := grpcServer.Serve(listener); err != nil {

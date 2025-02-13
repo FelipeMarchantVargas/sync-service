@@ -13,9 +13,10 @@ import (
 
 	pb "github.com/FelipeMarchantVargas/sync-service/proto"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
-func uploadFile(client pb.SyncServiceClient, filePath string) {
+func uploadFile(client pb.SyncServiceClient, filePath string, ctx context.Context) {
 	// Abrir el archivo original
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -34,7 +35,7 @@ func uploadFile(client pb.SyncServiceClient, filePath string) {
 	gzipWriter.Close()
 
 	// Crear stream para enviar el archivo comprimido
-	stream, err := client.UploadFile(context.Background())
+	stream, err := client.UploadFile(ctx)
 	if err != nil {
 		log.Fatalf("[ERROR] No se pudo iniciar la subida: %v", err)
 	}
@@ -64,8 +65,8 @@ func uploadFile(client pb.SyncServiceClient, filePath string) {
 	log.Println("[SUCCESS] Archivo subido con compresión:", resp.Message)
 }
 
-func downloadFile(client pb.SyncServiceClient, filename string) {
-	stream, err := client.DownloadFile(context.Background(), &pb.FileRequest{Filename: filename})
+func downloadFile(client pb.SyncServiceClient, filename string, ctx context.Context) {
+	stream, err := client.DownloadFile(ctx, &pb.FileRequest{Filename: filename})
 	if err != nil {
 		log.Fatalf("[ERROR] No se pudo solicitar el archivo: %v", err)
 	}
@@ -104,6 +105,20 @@ func downloadFile(client pb.SyncServiceClient, filename string) {
 	log.Printf("[SUCCESS] Archivo %s descargado y descomprimido", filename)
 }
 
+func login(client pb.AuthServiceClient, username, password string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	resp, err := client.Login(ctx, &pb.LoginRequest{
+		Username: username,
+		Password: password,
+	})
+	if err != nil {
+		log.Fatalf("[ERROR] No se pudo autenticar: %v", err)
+	}
+	log.Println("[SUCCESS] Token obtenido:", resp.Token)
+	return resp.Token
+}
 
 func main() {
 	// Definir flags CLI
@@ -119,34 +134,37 @@ func main() {
 		log.Fatalf("[ERROR] No se pudo conectar: %v", err)
 	}
 	defer conn.Close()
-	client := pb.NewSyncServiceClient(conn)
+	authClient := pb.NewAuthServiceClient(conn)
+	syncClient := pb.NewSyncServiceClient(conn)
+
+	token := login(authClient, "admin", "password")
+
+	ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", token))
+
 
 	// Ejecutar acción según el comando ingresado
 	switch {
 	case *uploadCmd != "":
-		// Verificar existencia del archivo antes de subirlo
 		if _, err := os.Stat(*uploadCmd); os.IsNotExist(err) {
 			log.Fatalf("[ERROR] El archivo %s no existe", *uploadCmd)
 		}
 		log.Printf("[INFO] Subiendo archivo: %s", *uploadCmd)
 		start := time.Now()
-		uploadFile(client, *uploadCmd)
+		uploadFile(syncClient, *uploadCmd, ctx)
 		elapsed := time.Since(start)
 		log.Printf("[SUCCESS] Archivo subido en %v", elapsed)
 
 	case *downloadCmd != "":
 		log.Printf("[INFO] Descargando archivo: %s", *downloadCmd)
 		start := time.Now()
-		downloadFile(client, *downloadCmd)
+		downloadFile(syncClient, *downloadCmd, ctx)
 		elapsed := time.Since(start)
 		log.Printf("[SUCCESS] Archivo descargado en %v", elapsed)
 
 	case *listCmd:
 		log.Println("[INFO] Listando archivos en el servidor...")
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
 
-		resp, err := client.ListFiles(ctx, &pb.Empty{})
+		resp, err := syncClient.ListFiles(ctx, &pb.Empty{})
 		if err != nil {
 			log.Fatalf("[ERROR] Error en ListFiles: %v", err)
 		}
