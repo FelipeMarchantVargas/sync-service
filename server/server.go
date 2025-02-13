@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	pb "github.com/FelipeMarchantVargas/sync-service/proto"
 	"google.golang.org/grpc"
@@ -36,80 +39,104 @@ func (s *SyncServer) ListFiles(ctx context.Context, req *pb.Empty) (*pb.FileList
 }
 
 func (s *SyncServer) UploadFile(stream pb.SyncService_UploadFileServer) error {
-	log.Println("Cliente inició la subida de un archivo.")
+	startTime := time.Now()
+	log.Println("[INFO] Cliente inició la subida de un archivo comprimido.")
 
 	var filename string
 	fileBuffer := []byte{}
 
 	for {
-		// Recibir fragmento del cliente
 		chunk, err := stream.Recv()
 		if err == io.EOF {
-			// Guardar el archivo cuando termina la transmisión
-			filePath := filepath.Join(storageDir, filename)
-			err := os.WriteFile(filePath, fileBuffer, 0644)
+			// Descomprimir el archivo antes de guardarlo
+			reader, err := gzip.NewReader(bytes.NewReader(fileBuffer))
 			if err != nil {
-				log.Printf("Error al guardar el archivo %s: %v", filename, err)
+				log.Printf("[ERROR] Error al descomprimir archivo %s: %v", filename, err)
 				return err
 			}
-			log.Printf("Archivo %s recibido y guardado correctamente", filename)
+
+			decompressedBuffer, err := io.ReadAll(reader)
+			reader.Close()
+			if err != nil {
+				log.Printf("[ERROR] Error al leer archivo descomprimido %s: %v", filename, err)
+				return err
+			}
+
+			// Guardar el archivo sin la extensión .gz
+			filePath := filepath.Join(storageDir, filename[:len(filename)-3])
+			err = os.WriteFile(filePath, decompressedBuffer, 0644)
+			if err != nil {
+				log.Printf("[ERROR] Error al guardar archivo %s: %v", filename, err)
+				return err
+			}
+
+			elapsed := time.Since(startTime)
+			log.Printf("[SUCCESS] Archivo %s recibido, descomprimido y guardado en %v", filePath, elapsed)
 			return stream.SendAndClose(&pb.UploadResponse{
-				Message: "Archivo subido con éxito",
+				Message: "Archivo subido y descomprimido con éxito",
 			})
 		}
+
 		if err != nil {
-			log.Printf("Error al recibir fragmento de archivo: %v", err)
+			log.Printf("[ERROR] Error al recibir fragmento: %v", err)
 			return err
 		}
 
-		// Guardar el nombre del archivo (solo la primera vez)
+		// Guardar el nombre del archivo (solo una vez)
 		if filename == "" {
 			filename = chunk.Filename
 		}
 
-		// Agregar los datos al buffer
+		// Agregar el fragmento al buffer
 		fileBuffer = append(fileBuffer, chunk.Data...)
 	}
 }
 
 func (s *SyncServer) DownloadFile(req *pb.FileRequest, stream pb.SyncService_DownloadFileServer) error {
+	startTime := time.Now()
 	filePath := filepath.Join(storageDir, req.Filename)
 
-	// Abrir el archivo para lectura
 	file, err := os.Open(filePath)
 	if err != nil {
-		log.Printf("Error al abrir el archivo %s: %v", req.Filename, err)
+		log.Printf("[ERROR] No se pudo abrir el archivo %s: %v", req.Filename, err)
 		return err
 	}
 	defer file.Close()
 
-	buffer := make([]byte, 1024) // Tamaño del fragmento (1KB)
+	// Comprimir el archivo en memoria
+	var compressedBuffer bytes.Buffer
+	gzipWriter := gzip.NewWriter(&compressedBuffer)
 
-	for {
-		// Leer un fragmento del archivo
-		n, err := file.Read(buffer)
-		if err == io.EOF {
-			break // Fin del archivo
-		}
-		if err != nil {
-			log.Printf("Error al leer el archivo %s: %v", req.Filename, err)
-			return err
+	_, err = io.Copy(gzipWriter, file)
+	gzipWriter.Close()
+	if err != nil {
+		log.Printf("[ERROR] No se pudo comprimir el archivo %s: %v", req.Filename, err)
+		return err
+	}
+
+	buffer := compressedBuffer.Bytes()
+	chunkSize := 1024
+	for i := 0; i < len(buffer); i += chunkSize {
+		end := i + chunkSize
+		if end > len(buffer) {
+			end = len(buffer)
 		}
 
-		// Enviar el fragmento al cliente
-		err = stream.Send(&pb.FileChunk{
-			Filename: req.Filename,
-			Data:     buffer[:n],
+		err := stream.Send(&pb.FileChunk{
+			Filename: req.Filename + ".gz",
+			Data:     buffer[i:end],
 		})
 		if err != nil {
-			log.Printf("Error al enviar fragmento del archivo %s: %v", req.Filename, err)
+			log.Printf("[ERROR] Error al enviar fragmento del archivo %s: %v", req.Filename, err)
 			return err
 		}
 	}
 
-	log.Printf("Archivo %s enviado correctamente", req.Filename)
+	elapsed := time.Since(startTime)
+	log.Printf("[SUCCESS] Archivo %s comprimido y enviado en %v", req.Filename, elapsed)
 	return nil
 }
+
 
 
 func main() {

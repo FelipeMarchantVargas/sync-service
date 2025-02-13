@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"flag"
 	"io"
 	"log"
 	"os"
@@ -13,116 +16,149 @@ import (
 )
 
 func uploadFile(client pb.SyncServiceClient, filePath string) {
-	// Abrir el archivo para leerlo
+	// Abrir el archivo original
 	file, err := os.Open(filePath)
 	if err != nil {
-		log.Fatalf("Error al abrir el archivo: %v", err)
+		log.Fatalf("[ERROR] No se pudo abrir el archivo: %v", err)
 	}
 	defer file.Close()
 
-	// Crear un stream para enviar el archivo al servidor
+	// Comprimir el archivo en memoria
+	var compressedBuffer bytes.Buffer
+	gzipWriter := gzip.NewWriter(&compressedBuffer)
+
+	_, err = io.Copy(gzipWriter, file)
+	if err != nil {
+		log.Fatalf("[ERROR] No se pudo comprimir el archivo: %v", err)
+	}
+	gzipWriter.Close()
+
+	// Crear stream para enviar el archivo comprimido
 	stream, err := client.UploadFile(context.Background())
 	if err != nil {
-		log.Fatalf("Error al iniciar la subida: %v", err)
+		log.Fatalf("[ERROR] No se pudo iniciar la subida: %v", err)
 	}
 
-	buffer := make([]byte, 1024) // Tamaño de fragmento (1KB)
+	chunkSize := 1024
+	compressedData := compressedBuffer.Bytes()
+	for i := 0; i < len(compressedData); i += chunkSize {
+		end := i + chunkSize
+		if end > len(compressedData) {
+			end = len(compressedData)
+		}
 
+		err := stream.Send(&pb.FileChunk{
+			Filename: filePath + ".gz",
+			Data:     compressedData[i:end],
+		})
+		if err != nil {
+			log.Fatalf("[ERROR] No se pudo enviar el fragmento: %v", err)
+		}
+	}
+
+	// Cerrar transmisión
+	resp, err := stream.CloseAndRecv()
+	if err != nil {
+		log.Fatalf("[ERROR] Error al cerrar la subida: %v", err)
+	}
+	log.Println("[SUCCESS] Archivo subido con compresión:", resp.Message)
+}
+
+func downloadFile(client pb.SyncServiceClient, filename string) {
+	stream, err := client.DownloadFile(context.Background(), &pb.FileRequest{Filename: filename})
+	if err != nil {
+		log.Fatalf("[ERROR] No se pudo solicitar el archivo: %v", err)
+	}
+
+	var compressedBuffer bytes.Buffer
 	for {
-		// Leer un fragmento del archivo
-		n, err := file.Read(buffer)
+		chunk, err := stream.Recv()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			log.Fatalf("Error al leer el archivo: %v", err)
+			log.Fatalf("[ERROR] No se pudo recibir el fragmento: %v", err)
 		}
-
-		// Enviar el fragmento al servidor
-		err = stream.Send(&pb.FileChunk{
-			Filename: filepath.Base(filePath),
-			Data:     buffer[:n],
-		})
-		if err != nil {
-			log.Fatalf("Error al enviar fragmento: %v", err)
-		}
+		compressedBuffer.Write(chunk.Data)
 	}
 
-	// Cerrar la transmisión y recibir respuesta del servidor
-	resp, err := stream.CloseAndRecv()
+	// Descomprimir archivo
+	reader, err := gzip.NewReader(&compressedBuffer)
 	if err != nil {
-		log.Fatalf("Error al cerrar la subida: %v", err)
+		log.Fatalf("[ERROR] No se pudo descomprimir el archivo: %v", err)
 	}
 
-	log.Println("Respuesta del servidor:", resp.Message)
-}
-
-func downloadFile(client pb.SyncServiceClient, filename string) {
-	// Solicitar el archivo al servidor
-	stream, err := client.DownloadFile(context.Background(), &pb.FileRequest{Filename: filename})
+	decompressedData, err := io.ReadAll(reader)
+	reader.Close()
 	if err != nil {
-		log.Fatalf("Error al solicitar archivo: %v", err)
+		log.Fatalf("[ERROR] Error al leer archivo descomprimido: %v", err)
 	}
 
-	// Crear el archivo en el sistema local
+	// Guardar el archivo descomprimido
 	filePath := filepath.Join("./", filename)
-	file, err := os.Create(filePath)
+	err = os.WriteFile(filePath, decompressedData, 0644)
 	if err != nil {
-		log.Fatalf("Error al crear archivo local: %v", err)
-	}
-	defer file.Close()
-
-	for {
-		// Recibir un fragmento del archivo
-		chunk, err := stream.Recv()
-		if err == io.EOF {
-			break // Archivo completo
-		}
-		if err != nil {
-			log.Fatalf("Error al recibir fragmento: %v", err)
-		}
-
-		// Escribir el fragmento en el archivo local
-		_, err = file.Write(chunk.Data)
-		if err != nil {
-			log.Fatalf("Error al escribir en el archivo: %v", err)
-		}
+		log.Fatalf("[ERROR] No se pudo guardar el archivo: %v", err)
 	}
 
-	log.Printf("Archivo %s descargado exitosamente", filename)
+	log.Printf("[SUCCESS] Archivo %s descargado y descomprimido", filename)
 }
 
 
 func main() {
+	// Definir flags CLI
+	uploadCmd := flag.String("upload", "", "Sube un archivo al servidor")
+	downloadCmd := flag.String("download", "", "Descarga un archivo desde el servidor")
+	listCmd := flag.Bool("list", false, "Lista los archivos en el servidor")
+	flag.Parse()
+
 	// Conectar al servidor gRPC
+	startTime := time.Now()
 	conn, err := grpc.Dial("localhost:50051", grpc.WithInsecure())
 	if err != nil {
-		log.Fatalf("No se pudo conectar: %v", err)
+		log.Fatalf("[ERROR] No se pudo conectar: %v", err)
 	}
 	defer conn.Close()
-
 	client := pb.NewSyncServiceClient(conn)
 
-	// Listar archivos disponibles en el servidor
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	// Ejecutar acción según el comando ingresado
+	switch {
+	case *uploadCmd != "":
+		// Verificar existencia del archivo antes de subirlo
+		if _, err := os.Stat(*uploadCmd); os.IsNotExist(err) {
+			log.Fatalf("[ERROR] El archivo %s no existe", *uploadCmd)
+		}
+		log.Printf("[INFO] Subiendo archivo: %s", *uploadCmd)
+		start := time.Now()
+		uploadFile(client, *uploadCmd)
+		elapsed := time.Since(start)
+		log.Printf("[SUCCESS] Archivo subido en %v", elapsed)
 
-	resp, err := client.ListFiles(ctx, &pb.Empty{})
-	if err != nil {
-		log.Fatalf("Error en ListFiles: %v", err)
+	case *downloadCmd != "":
+		log.Printf("[INFO] Descargando archivo: %s", *downloadCmd)
+		start := time.Now()
+		downloadFile(client, *downloadCmd)
+		elapsed := time.Since(start)
+		log.Printf("[SUCCESS] Archivo descargado en %v", elapsed)
+
+	case *listCmd:
+		log.Println("[INFO] Listando archivos en el servidor...")
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		resp, err := client.ListFiles(ctx, &pb.Empty{})
+		if err != nil {
+			log.Fatalf("[ERROR] Error en ListFiles: %v", err)
+		}
+		log.Println("[SUCCESS] Archivos en el servidor:", resp.Filenames)
+
+	default:
+		log.Println("[INFO] Uso:")
+		log.Println("  - Para subir un archivo:   go run client/client.go --upload nombre_archivo.txt")
+		log.Println("  - Para descargar un archivo: go run client/client.go --download nombre_archivo.txt")
+		log.Println("  - Para listar archivos:    go run client/client.go --list")
 	}
-	log.Println("Archivos en el servidor:", resp.Filenames)
 
-	// Subir un archivo
-	uploadFile(client, "testfile.txt")
-
-	// Volver a listar archivos
-	resp, err = client.ListFiles(ctx, &pb.Empty{})
-	if err != nil {
-		log.Fatalf("Error en ListFiles después de subir: %v", err)
-	}
-	log.Println("Archivos después de subir:", resp.Filenames)
-
-	// Descargar el archivo subido
-	downloadFile(client, "testfile.txt")
+	totalTime := time.Since(startTime)
+	log.Printf("[INFO] Tiempo total de ejecución: %v", totalTime)
 }
