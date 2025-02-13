@@ -19,6 +19,112 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	AuthService_Login_FullMethodName = "/sync.AuthService/Login"
+)
+
+// AuthServiceClient is the client API for AuthService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// Servicio de autenticación
+type AuthServiceClient interface {
+	Login(ctx context.Context, in *LoginRequest, opts ...grpc.CallOption) (*LoginResponse, error)
+}
+
+type authServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewAuthServiceClient(cc grpc.ClientConnInterface) AuthServiceClient {
+	return &authServiceClient{cc}
+}
+
+func (c *authServiceClient) Login(ctx context.Context, in *LoginRequest, opts ...grpc.CallOption) (*LoginResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(LoginResponse)
+	err := c.cc.Invoke(ctx, AuthService_Login_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// AuthServiceServer is the server API for AuthService service.
+// All implementations must embed UnimplementedAuthServiceServer
+// for forward compatibility.
+//
+// Servicio de autenticación
+type AuthServiceServer interface {
+	Login(context.Context, *LoginRequest) (*LoginResponse, error)
+	mustEmbedUnimplementedAuthServiceServer()
+}
+
+// UnimplementedAuthServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedAuthServiceServer struct{}
+
+func (UnimplementedAuthServiceServer) Login(context.Context, *LoginRequest) (*LoginResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Login not implemented")
+}
+func (UnimplementedAuthServiceServer) mustEmbedUnimplementedAuthServiceServer() {}
+func (UnimplementedAuthServiceServer) testEmbeddedByValue()                     {}
+
+// UnsafeAuthServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to AuthServiceServer will
+// result in compilation errors.
+type UnsafeAuthServiceServer interface {
+	mustEmbedUnimplementedAuthServiceServer()
+}
+
+func RegisterAuthServiceServer(s grpc.ServiceRegistrar, srv AuthServiceServer) {
+	// If the following call pancis, it indicates UnimplementedAuthServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&AuthService_ServiceDesc, srv)
+}
+
+func _AuthService_Login_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LoginRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuthServiceServer).Login(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuthService_Login_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuthServiceServer).Login(ctx, req.(*LoginRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// AuthService_ServiceDesc is the grpc.ServiceDesc for AuthService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var AuthService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "sync.AuthService",
+	HandlerType: (*AuthServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "Login",
+			Handler:    _AuthService_Login_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "proto/sync.proto",
+}
+
+const (
 	SyncService_UploadFile_FullMethodName   = "/sync.SyncService/UploadFile"
 	SyncService_DownloadFile_FullMethodName = "/sync.SyncService/DownloadFile"
 	SyncService_ListFiles_FullMethodName    = "/sync.SyncService/ListFiles"
@@ -27,12 +133,11 @@ const (
 // SyncServiceClient is the client API for SyncService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// Servicio de sincronización de archivos
 type SyncServiceClient interface {
-	// Subir un archivo al servidor
 	UploadFile(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[FileChunk, UploadResponse], error)
-	// Descargar un archivo desde el servidor
 	DownloadFile(ctx context.Context, in *FileRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[FileChunk], error)
-	// Obtener la lista de archivos disponibles
 	ListFiles(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*FileList, error)
 }
 
@@ -89,12 +194,11 @@ func (c *syncServiceClient) ListFiles(ctx context.Context, in *Empty, opts ...gr
 // SyncServiceServer is the server API for SyncService service.
 // All implementations must embed UnimplementedSyncServiceServer
 // for forward compatibility.
+//
+// Servicio de sincronización de archivos
 type SyncServiceServer interface {
-	// Subir un archivo al servidor
 	UploadFile(grpc.ClientStreamingServer[FileChunk, UploadResponse]) error
-	// Descargar un archivo desde el servidor
 	DownloadFile(*FileRequest, grpc.ServerStreamingServer[FileChunk]) error
-	// Obtener la lista de archivos disponibles
 	ListFiles(context.Context, *Empty) (*FileList, error)
 	mustEmbedUnimplementedSyncServiceServer()
 }

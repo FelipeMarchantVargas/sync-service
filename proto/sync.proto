@@ -4,37 +4,45 @@ package sync;
 
 option go_package = "proto/";
 
+// Servicio de autenticación
+service AuthService {
+    rpc Login(LoginRequest) returns (LoginResponse);
+}
+
+// Servicio de sincronización de archivos
 service SyncService {
-    // Subir un archivo al servidor
     rpc UploadFile(stream FileChunk) returns (UploadResponse);
-    
-    // Descargar un archivo desde el servidor
     rpc DownloadFile(FileRequest) returns (stream FileChunk);
-    
-    // Obtener la lista de archivos disponibles
     rpc ListFiles(Empty) returns (FileList);
 }
 
-// Estructura para representar un fragmento de archivo
+// Mensajes para autenticación
+message LoginRequest {
+    string username = 1;
+    string password = 2;
+}
+
+message LoginResponse {
+    string token = 1;
+}
+
+// Estructuras para transferencia de archivos
 message FileChunk {
     string filename = 1;
     bytes data = 2;
 }
 
-// Petición para descargar un archivo
 message FileRequest {
     string filename = 1;
+    string token = 2;
 }
 
-// Respuesta tras subir un archivo
 message UploadResponse {
     string message = 1;
 }
 
-// Lista de archivos en el servidor
 message FileList {
     repeated string filenames = 1;
 }
 
-// Mensaje vacío para peticiones sin parámetros
 message Empty {}
