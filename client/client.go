@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
+
 	pb "github.com/FelipeMarchantVargas/sync-service/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -120,11 +122,49 @@ func login(client pb.AuthServiceClient, username, password string) string {
 	return resp.Token
 }
 
+func watchDirectory(syncClient pb.SyncServiceClient, dirPath string, ctx context.Context) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatalf("[ERROR] No se pudo iniciar el watcher: %v", err)
+	}
+	defer watcher.Close()
+
+	// Agregar el directorio a la lista de observados
+	err = watcher.Add(dirPath)
+	if err != nil {
+		log.Fatalf("[ERROR] No se pudo observar el directorio: %v", err)
+	}
+
+	log.Println("[INFO] Monitoreando cambios en:", dirPath)
+
+	for {
+		select {
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+
+			// Detectar si es creación o modificación
+			if event.Op&fsnotify.Create == fsnotify.Create || event.Op&fsnotify.Write == fsnotify.Write {
+				log.Printf("[INFO] Detectado nuevo archivo/modificación: %s", event.Name)
+				uploadFile(syncClient, event.Name, ctx)
+			}
+
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			log.Printf("[ERROR] Error en watcher: %v", err)
+		}
+	}
+}
+
 func main() {
 	// Definir flags CLI
 	uploadCmd := flag.String("upload", "", "Sube un archivo al servidor")
 	downloadCmd := flag.String("download", "", "Descarga un archivo desde el servidor")
 	listCmd := flag.Bool("list", false, "Lista los archivos en el servidor")
+	watchCmd := flag.String("watch", "", "Monitorea un directorio y sincroniza archivos automáticamente")
 	flag.Parse()
 
 	// Conectar al servidor gRPC
@@ -138,9 +178,7 @@ func main() {
 	syncClient := pb.NewSyncServiceClient(conn)
 
 	token := login(authClient, "admin", "password")
-
 	ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", token))
-
 
 	// Ejecutar acción según el comando ingresado
 	switch {
@@ -170,11 +208,16 @@ func main() {
 		}
 		log.Println("[SUCCESS] Archivos en el servidor:", resp.Filenames)
 
+	case *watchCmd != "":
+		log.Println("[INFO] Iniciando sincronización automática en:", *watchCmd)
+		watchDirectory(syncClient, *watchCmd, ctx)
+
 	default:
 		log.Println("[INFO] Uso:")
 		log.Println("  - Para subir un archivo:   go run client/client.go --upload nombre_archivo.txt")
 		log.Println("  - Para descargar un archivo: go run client/client.go --download nombre_archivo.txt")
 		log.Println("  - Para listar archivos:    go run client/client.go --list")
+		log.Println("  - Para monitorear un dir:  go run client/client.go --watch carpeta/")
 	}
 
 	totalTime := time.Since(startTime)

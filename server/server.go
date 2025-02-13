@@ -59,25 +59,27 @@ func (s *SyncServer) UploadFile(stream pb.SyncService_UploadFileServer) error {
 	for {
 		chunk, err := stream.Recv()
 		if err == io.EOF {
+
+			safeFilename := filepath.Base(filename)
 			// Descomprimir el archivo antes de guardarlo
 			reader, err := gzip.NewReader(bytes.NewReader(fileBuffer))
 			if err != nil {
-				log.Printf("[ERROR] Error al descomprimir archivo %s: %v", filename, err)
+				log.Printf("[ERROR] Error al descomprimir archivo %s: %v", safeFilename, err)
 				return err
 			}
 
 			decompressedBuffer, err := io.ReadAll(reader)
 			reader.Close()
 			if err != nil {
-				log.Printf("[ERROR] Error al leer archivo descomprimido %s: %v", filename, err)
+				log.Printf("[ERROR] Error al leer archivo descomprimido %s: %v", safeFilename, err)
 				return err
 			}
 
 			// Guardar el archivo sin la extensión .gz
-			filePath := filepath.Join(storageDir, filename[:len(filename)-3])
+			filePath := filepath.Join(storageDir, safeFilename[:len(safeFilename)-3])
 			err = os.WriteFile(filePath, decompressedBuffer, 0644)
 			if err != nil {
-				log.Printf("[ERROR] Error al guardar archivo %s: %v", filename, err)
+				log.Printf("[ERROR] Error al guardar archivo %s: %v", safeFilename, err)
 				return err
 			}
 
@@ -184,8 +186,6 @@ func authenticate(ctx context.Context) error {
 
 	return nil
 }
-
-
 
 func main() {
 
