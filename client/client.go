@@ -19,6 +19,19 @@ import (
 )
 
 func uploadFile(client pb.SyncServiceClient, filePath string, ctx context.Context) {
+	startTime := time.Now()
+		// Extraer solo el nombre base del archivo
+		filename := filepath.Base(filePath)
+
+		// Obtener tamaño del archivo
+		fileInfo, err := os.Stat(filePath)
+		if err != nil {
+			log.Fatalf("[ERROR] No se pudo obtener info del archivo: %v", err)
+		}
+		fileSize := fileInfo.Size()
+	
+		log.Printf("[INFO] (%s) Subiendo %s (%d KB)", time.Now().Format("15:04:05"), filename, fileSize/1024)
+	
 	// Abrir el archivo original
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -60,14 +73,18 @@ func uploadFile(client pb.SyncServiceClient, filePath string, ctx context.Contex
 	}
 
 	// Cerrar transmisión
-	resp, err := stream.CloseAndRecv()
+	_, err = stream.CloseAndRecv()
 	if err != nil {
 		log.Fatalf("[ERROR] Error al cerrar la subida: %v", err)
 	}
-	log.Println("[SUCCESS] Archivo subido con compresión:", resp.Message)
+	elapsed := time.Since(startTime)
+	log.Printf("[SUCCESS] (%s) %s subido en %.2f s", time.Now().Format("15:04:05"), filename, elapsed.Seconds())
 }
 
 func downloadFile(client pb.SyncServiceClient, filename string, ctx context.Context) {
+	startTime := time.Now()
+	log.Printf("[INFO] (%s) Descargando %s...", time.Now().Format("15:04:05"), filename)
+
 	stream, err := client.DownloadFile(ctx, &pb.FileRequest{Filename: filename})
 	if err != nil {
 		log.Fatalf("[ERROR] No se pudo solicitar el archivo: %v", err)
@@ -104,8 +121,28 @@ func downloadFile(client pb.SyncServiceClient, filename string, ctx context.Cont
 		log.Fatalf("[ERROR] No se pudo guardar el archivo: %v", err)
 	}
 
-	log.Printf("[SUCCESS] Archivo %s descargado y descomprimido", filename)
+	elapsed := time.Since(startTime)
+	log.Printf("[SUCCESS] (%s) %s descargado en %.2f s", time.Now().Format("15:04:05"), filename, elapsed.Seconds())
 }
+
+func deleteFile(client pb.SyncServiceClient, filePath string, ctx context.Context) {
+	startTime := time.Now()
+
+	// Extraer solo el nombre base del archivo
+	filename := filepath.Base(filePath)
+
+	log.Printf("[INFO] (%s) Eliminando %s del servidor...", time.Now().Format("15:04:05"), filename)
+
+	_, err := client.DeleteFile(ctx, &pb.FileRequest{Filename: filename})
+	if err != nil {
+		log.Printf("[ERROR] No se pudo eliminar el archivo en el servidor: %v", err)
+		return
+	}
+
+	elapsed := time.Since(startTime)
+	log.Printf("[SUCCESS] (%s) Archivo %s eliminado en %.2f s", time.Now().Format("15:04:05"), filename, elapsed.Seconds())
+}
+
 
 func login(client pb.AuthServiceClient, username, password string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -148,6 +185,11 @@ func watchDirectory(syncClient pb.SyncServiceClient, dirPath string, ctx context
 			if event.Op&fsnotify.Create == fsnotify.Create || event.Op&fsnotify.Write == fsnotify.Write {
 				log.Printf("[INFO] Detectado nuevo archivo/modificación: %s", event.Name)
 				uploadFile(syncClient, event.Name, ctx)
+			}
+			// Detectar eliminación de archivos
+			if event.Op&fsnotify.Remove == fsnotify.Remove {
+				log.Printf("[INFO] (%s) Detectada eliminación: %s", time.Now().Format("15:04:05"), event.Name)
+				deleteFile(syncClient, event.Name, ctx)
 			}
 
 		case err, ok := <-watcher.Errors:

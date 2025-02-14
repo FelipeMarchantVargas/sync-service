@@ -51,6 +51,7 @@ func (s *SyncServer) UploadFile(stream pb.SyncService_UploadFileServer) error {
 		return err
 	}
 	startTime := time.Now()
+
 	log.Println("[INFO] Cliente inició la subida de un archivo comprimido.")
 
 	var filename string
@@ -59,8 +60,8 @@ func (s *SyncServer) UploadFile(stream pb.SyncService_UploadFileServer) error {
 	for {
 		chunk, err := stream.Recv()
 		if err == io.EOF {
-
 			safeFilename := filepath.Base(filename)
+
 			// Descomprimir el archivo antes de guardarlo
 			reader, err := gzip.NewReader(bytes.NewReader(fileBuffer))
 			if err != nil {
@@ -84,7 +85,8 @@ func (s *SyncServer) UploadFile(stream pb.SyncService_UploadFileServer) error {
 			}
 
 			elapsed := time.Since(startTime)
-			log.Printf("[SUCCESS] Archivo %s recibido, descomprimido y guardado en %v", filePath, elapsed)
+			fileSize := len(decompressedBuffer)
+			log.Printf("[SUCCESS] (%s) %s recibido (%d KB) y guardado en %.2f s", time.Now().Format("15:04:05"), safeFilename, fileSize/1024, elapsed.Seconds())
 			return stream.SendAndClose(&pb.UploadResponse{
 				Message: "Archivo subido y descomprimido con éxito",
 			})
@@ -151,6 +153,33 @@ func (s *SyncServer) DownloadFile(req *pb.FileRequest, stream pb.SyncService_Dow
 	elapsed := time.Since(startTime)
 	log.Printf("[SUCCESS] Archivo %s comprimido y enviado en %v", req.Filename, elapsed)
 	return nil
+}
+
+func (s *SyncServer) DeleteFile(ctx context.Context, req *pb.FileRequest) (*pb.UploadResponse, error) {
+	if err := authenticate(ctx); err != nil {
+		return nil, err
+	}
+
+	startTime := time.Now()
+	filePath := filepath.Join(storageDir, req.Filename)
+
+	// Verificar si el archivo existe
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		log.Printf("[ERROR] Archivo %s no encontrado en el servidor.", req.Filename)
+		return nil, status.Errorf(codes.NotFound, "El archivo %s no existe en el servidor", req.Filename)
+	}
+
+	// Eliminar el archivo
+	err := os.Remove(filePath)
+	if err != nil {
+		log.Printf("[ERROR] No se pudo eliminar %s: %v", req.Filename, err)
+		return nil, status.Errorf(codes.Internal, "Error al eliminar %s", req.Filename)
+	}
+
+	elapsed := time.Since(startTime)
+	log.Printf("[SUCCESS] (%s) Archivo %s eliminado en %.2f s", time.Now().Format("15:04:05"), req.Filename, elapsed.Seconds())
+
+	return &pb.UploadResponse{Message: "Archivo eliminado correctamente"}, nil
 }
 
 func (s *AuthServer) Login(ctx context.Context, req *pb.LoginRequest) (*pb.LoginResponse, error) {
