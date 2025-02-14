@@ -14,6 +14,7 @@ service SyncService {
     rpc UploadFile(stream FileChunk) returns (UploadResponse);
     rpc DownloadFile(FileRequest) returns (stream FileChunk);
     rpc ListFiles(Empty) returns (FileList);
+    rpc DeleteFile(FileRequest) returns (UploadResponse);
 }
 
 // Mensajes para autenticación

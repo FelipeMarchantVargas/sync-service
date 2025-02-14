@@ -128,6 +128,7 @@ const (
 	SyncService_UploadFile_FullMethodName   = "/sync.SyncService/UploadFile"
 	SyncService_DownloadFile_FullMethodName = "/sync.SyncService/DownloadFile"
 	SyncService_ListFiles_FullMethodName    = "/sync.SyncService/ListFiles"
+	SyncService_DeleteFile_FullMethodName   = "/sync.SyncService/DeleteFile"
 )
 
 // SyncServiceClient is the client API for SyncService service.
@@ -139,6 +140,7 @@ type SyncServiceClient interface {
 	UploadFile(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[FileChunk, UploadResponse], error)
 	DownloadFile(ctx context.Context, in *FileRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[FileChunk], error)
 	ListFiles(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*FileList, error)
+	DeleteFile(ctx context.Context, in *FileRequest, opts ...grpc.CallOption) (*UploadResponse, error)
 }
 
 type syncServiceClient struct {
@@ -191,6 +193,16 @@ func (c *syncServiceClient) ListFiles(ctx context.Context, in *Empty, opts ...gr
 	return out, nil
 }
 
+func (c *syncServiceClient) DeleteFile(ctx context.Context, in *FileRequest, opts ...grpc.CallOption) (*UploadResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UploadResponse)
+	err := c.cc.Invoke(ctx, SyncService_DeleteFile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SyncServiceServer is the server API for SyncService service.
 // All implementations must embed UnimplementedSyncServiceServer
 // for forward compatibility.
@@ -200,6 +212,7 @@ type SyncServiceServer interface {
 	UploadFile(grpc.ClientStreamingServer[FileChunk, UploadResponse]) error
 	DownloadFile(*FileRequest, grpc.ServerStreamingServer[FileChunk]) error
 	ListFiles(context.Context, *Empty) (*FileList, error)
+	DeleteFile(context.Context, *FileRequest) (*UploadResponse, error)
 	mustEmbedUnimplementedSyncServiceServer()
 }
 
@@ -218,6 +231,9 @@ func (UnimplementedSyncServiceServer) DownloadFile(*FileRequest, grpc.ServerStre
 }
 func (UnimplementedSyncServiceServer) ListFiles(context.Context, *Empty) (*FileList, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListFiles not implemented")
+}
+func (UnimplementedSyncServiceServer) DeleteFile(context.Context, *FileRequest) (*UploadResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteFile not implemented")
 }
 func (UnimplementedSyncServiceServer) mustEmbedUnimplementedSyncServiceServer() {}
 func (UnimplementedSyncServiceServer) testEmbeddedByValue()                     {}
@@ -276,6 +292,24 @@ func _SyncService_ListFiles_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SyncService_DeleteFile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SyncServiceServer).DeleteFile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SyncService_DeleteFile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SyncServiceServer).DeleteFile(ctx, req.(*FileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SyncService_ServiceDesc is the grpc.ServiceDesc for SyncService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -286,6 +320,10 @@ var SyncService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListFiles",
 			Handler:    _SyncService_ListFiles_Handler,
+		},
+		{
+			MethodName: "DeleteFile",
+			Handler:    _SyncService_DeleteFile_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
