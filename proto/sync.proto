@@ -15,6 +15,7 @@ service SyncService {
     rpc DownloadFile(FileRequest) returns (stream FileChunk);
     rpc ListFiles(Empty) returns (FileList);
     rpc DeleteFile(FileRequest) returns (UploadResponse);
+    rpc SyncUpdates(Empty) returns (stream FileUpdate);
 }
 
 // Mensajes para autenticación
@@ -47,3 +48,9 @@ message FileList {
 }
 
 message Empty {}
+
+// Estructura para actualizaciones
+message FileUpdate {
+    string filename = 1;
+    string action = 2; // "created", "modified", "deleted"
+}

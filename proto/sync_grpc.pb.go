@@ -129,6 +129,7 @@ const (
 	SyncService_DownloadFile_FullMethodName = "/sync.SyncService/DownloadFile"
 	SyncService_ListFiles_FullMethodName    = "/sync.SyncService/ListFiles"
 	SyncService_DeleteFile_FullMethodName   = "/sync.SyncService/DeleteFile"
+	SyncService_SyncUpdates_FullMethodName  = "/sync.SyncService/SyncUpdates"
 )
 
 // SyncServiceClient is the client API for SyncService service.
@@ -141,6 +142,7 @@ type SyncServiceClient interface {
 	DownloadFile(ctx context.Context, in *FileRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[FileChunk], error)
 	ListFiles(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*FileList, error)
 	DeleteFile(ctx context.Context, in *FileRequest, opts ...grpc.CallOption) (*UploadResponse, error)
+	SyncUpdates(ctx context.Context, in *Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[FileUpdate], error)
 }
 
 type syncServiceClient struct {
@@ -203,6 +205,25 @@ func (c *syncServiceClient) DeleteFile(ctx context.Context, in *FileRequest, opt
 	return out, nil
 }
 
+func (c *syncServiceClient) SyncUpdates(ctx context.Context, in *Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[FileUpdate], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &SyncService_ServiceDesc.Streams[2], SyncService_SyncUpdates_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[Empty, FileUpdate]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SyncService_SyncUpdatesClient = grpc.ServerStreamingClient[FileUpdate]
+
 // SyncServiceServer is the server API for SyncService service.
 // All implementations must embed UnimplementedSyncServiceServer
 // for forward compatibility.
@@ -213,6 +234,7 @@ type SyncServiceServer interface {
 	DownloadFile(*FileRequest, grpc.ServerStreamingServer[FileChunk]) error
 	ListFiles(context.Context, *Empty) (*FileList, error)
 	DeleteFile(context.Context, *FileRequest) (*UploadResponse, error)
+	SyncUpdates(*Empty, grpc.ServerStreamingServer[FileUpdate]) error
 	mustEmbedUnimplementedSyncServiceServer()
 }
 
@@ -234,6 +256,9 @@ func (UnimplementedSyncServiceServer) ListFiles(context.Context, *Empty) (*FileL
 }
 func (UnimplementedSyncServiceServer) DeleteFile(context.Context, *FileRequest) (*UploadResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeleteFile not implemented")
+}
+func (UnimplementedSyncServiceServer) SyncUpdates(*Empty, grpc.ServerStreamingServer[FileUpdate]) error {
+	return status.Errorf(codes.Unimplemented, "method SyncUpdates not implemented")
 }
 func (UnimplementedSyncServiceServer) mustEmbedUnimplementedSyncServiceServer() {}
 func (UnimplementedSyncServiceServer) testEmbeddedByValue()                     {}
@@ -310,6 +335,17 @@ func _SyncService_DeleteFile_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SyncService_SyncUpdates_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(Empty)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(SyncServiceServer).SyncUpdates(m, &grpc.GenericServerStream[Empty, FileUpdate]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SyncService_SyncUpdatesServer = grpc.ServerStreamingServer[FileUpdate]
+
 // SyncService_ServiceDesc is the grpc.ServiceDesc for SyncService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -335,6 +371,11 @@ var SyncService_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "DownloadFile",
 			Handler:       _SyncService_DownloadFile_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "SyncUpdates",
+			Handler:       _SyncService_SyncUpdates_Handler,
 			ServerStreams: true,
 		},
 	},
