@@ -201,6 +201,31 @@ func watchDirectory(syncClient pb.SyncServiceClient, dirPath string, ctx context
 	}
 }
 
+func listenForUpdates(client pb.SyncServiceClient, ctx context.Context) {
+	stream, err := client.SyncUpdates(ctx, &pb.Empty{})
+	if err != nil {
+		log.Fatalf("[ERROR] No se pudo conectar al stream de actualizaciones: %v", err)
+	}
+
+	log.Println("[INFO] Escuchando actualizaciones del servidor...")
+
+	for {
+		update, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Fatalf("[ERROR] Error al recibir actualización: %v", err)
+		}
+
+		log.Printf("[INFO] (%s) Cambio en el servidor: %s - %s", time.Now().Format("15:04:05"), update.Action, update.Filename)
+
+		if update.Action == "created" {
+			downloadFile(client, update.Filename, ctx)
+		}
+	}
+}
+
 func main() {
 	// Definir flags CLI
 	uploadCmd := flag.String("upload", "", "Sube un archivo al servidor")
@@ -252,7 +277,11 @@ func main() {
 
 	case *watchCmd != "":
 		log.Println("[INFO] Iniciando sincronización automática en:", *watchCmd)
-		watchDirectory(syncClient, *watchCmd, ctx)
+
+		go watchDirectory(syncClient, *watchCmd, ctx) // Monitorear cambios locales
+		go listenForUpdates(syncClient, ctx)         // Escuchar cambios remotos
+
+		select {} // Mantener el programa corriendo
 
 	default:
 		log.Println("[INFO] Uso:")

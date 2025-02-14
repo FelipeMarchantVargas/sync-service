@@ -13,6 +13,7 @@ import (
 
 	pb "github.com/FelipeMarchantVargas/sync-service/proto"
 	"github.com/FelipeMarchantVargas/sync-service/server/auth"
+	"github.com/fsnotify/fsnotify"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -23,10 +24,69 @@ const storageDir = "./storage"
 
 type SyncServer struct {
 	pb.UnimplementedSyncServiceServer
+	updateClients []pb.SyncService_SyncUpdatesServer
 }
 
 type AuthServer struct {
 	pb.UnimplementedAuthServiceServer
+}
+
+func (s *SyncServer) SyncUpdates(req *pb.Empty, stream pb.SyncService_SyncUpdatesServer) error {
+	s.updateClients = append(s.updateClients, stream)
+
+	// Mantiene el stream abierto
+	<-stream.Context().Done()
+	return nil
+}
+
+// Función para notificar cambios a los clientes conectados
+func (s *SyncServer) notifyClients(filename string, action string) {
+	for _, client := range s.updateClients {
+		client.Send(&pb.FileUpdate{Filename: filename, Action: action})
+	}
+}
+
+// Iniciar watcher en el directorio del servidor
+func (s *SyncServer) watchServerDirectory() {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatalf("[ERROR] No se pudo iniciar el watcher en el servidor: %v", err)
+	}
+	defer watcher.Close()
+
+	err = watcher.Add(storageDir)
+	if err != nil {
+		log.Fatalf("[ERROR] No se pudo observar el directorio: %v", err)
+	}
+
+	log.Println("[INFO] Monitoreando cambios en el servidor...")
+
+	for {
+		select {
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+
+			filename := filepath.Base(event.Name)
+
+			if event.Op&fsnotify.Create == fsnotify.Create || event.Op&fsnotify.Write == fsnotify.Write {
+				log.Printf("[INFO] Archivo creado/modificado en el servidor: %s", filename)
+				s.notifyClients(filename, "created")
+			}
+
+			if event.Op&fsnotify.Remove == fsnotify.Remove {
+				log.Printf("[INFO] Archivo eliminado en el servidor: %s", filename)
+				s.notifyClients(filename, "deleted")
+			}
+
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			log.Printf("[ERROR] Error en watcher del servidor: %v", err)
+		}
+	}
 }
 
 func (s *SyncServer) ListFiles(ctx context.Context, req *pb.Empty) (*pb.FileList, error) {
@@ -230,8 +290,12 @@ func main() {
 
 	// Crear el servidor gRPC
 	grpcServer := grpc.NewServer()
-	pb.RegisterSyncServiceServer(grpcServer, &SyncServer{})
+	syncServer := &SyncServer{}
+	pb.RegisterSyncServiceServer(grpcServer, syncServer)
 	pb.RegisterAuthServiceServer(grpcServer, &AuthServer{})
+
+	// Iniciar watcher en el servidor
+	go syncServer.watchServerDirectory()
 
 	log.Println("Servidor gRPC corriendo en el puerto 50051")
 	if err := grpcServer.Serve(listener); err != nil {
