@@ -14,11 +14,23 @@ Sync Service es un servicio basado en gRPC escrito en Go, diseñado para sincron
 Antes de ejecutar el proyecto, asegúrate de tener instalado:
 
 - Go (>=1.18)
-- gRPC y Protobuf
-
-Para instalar las dependencias necesarias, ejecuta:
+- Protocol Buffers (protoc v3 o superior):
+- gRPC para Go: Puedes instalarlo con:
 
 ```
+go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+```
+
+Asegúrate de agregar $GOPATH/bin a tu PATH si no lo has hecho.
+
+# Instalación
+
+Clona el repositorio e instala las dependencias necesarias:
+
+```
+git clone https://github.com/FelipeMarchantVargas/sync-service.git
+cd sync-service
 go mod tidy
 ```
 
@@ -33,7 +45,7 @@ go mod tidy
 └── README.md     # Documentación del proyecto
 ```
 
-## Instalación y Ejecución
+## Ejecución
 
 ### 1. Iniciar el Servidor
 
@@ -53,16 +65,12 @@ go run client/client.go
 
 ## Uso
 
-El cliente se conecta al servidor y envía datos de sincronización, recibiendo una confirmación por parte del servidor.
+### Ejemplo de sincronización
 
-Ejemplo de solicitud en client/client.go:
+Una vez que el servidor esté en ejecución, el cliente puede enviar archivos para sincronización. Un ejemplo básico de uso sería:
 
 ```
-response, err := client.SyncData(ctx, &pb.SyncRequest{Data: "Ejemplo de sincronización"})
-if err != nil {
-    log.Fatalf("Error en la sincronización: %v", err)
-}
-log.Printf("Respuesta del servidor: %v", response.Status)
+./client --file /ruta/del/archivo.txt
 ```
 
 ## Mejoras futuras
