@@ -113,11 +113,23 @@ func (s *SyncServer) ListFiles(ctx context.Context, req *pb.Empty) (*pb.FileList
 }
 
 func (s *SyncServer) UploadFile(stream pb.SyncService_UploadFileServer) error {
+	// 1️⃣ Autenticar usuario y obtener su username
 	username, err := getUsernameFromContext(stream.Context())
 	if err != nil {
 		return err
 	}
 
+	if err := authenticate(stream.Context()); err != nil {
+		return err
+	}
+
+	// 2️⃣ Obtener clave de cifrado del usuario
+	key, err := auth.GetAESKey(username)
+	if err != nil {
+		return status.Errorf(codes.Internal, "Error obteniendo clave de cifrado")
+	}
+
+	// 3️⃣ Verificar si el directorio del usuario existe, si no, crearlo
 	userStorageDir := filepath.Join(storageDir, username)
 	if _, err := os.Stat(userStorageDir); os.IsNotExist(err) {
 		os.Mkdir(userStorageDir, os.ModePerm)
@@ -127,43 +139,14 @@ func (s *SyncServer) UploadFile(stream pb.SyncService_UploadFileServer) error {
 	log.Printf("[INFO] (%s) %s está subiendo un archivo", time.Now().Format("15:04:05"), username)
 
 	var filename string
-	fileBuffer := []byte{}
+	var fileBuffer bytes.Buffer
 
+	// 4️⃣ Recibir los fragmentos del archivo
 	for {
 		chunk, err := stream.Recv()
 		if err == io.EOF {
-			safeFilename := filepath.Base(filename)
-
-			// Descomprimir el archivo antes de guardarlo
-			reader, err := gzip.NewReader(bytes.NewReader(fileBuffer))
-			if err != nil {
-				log.Printf("[ERROR] Error al descomprimir archivo %s: %v", safeFilename, err)
-				return err
-			}
-
-			decompressedBuffer, err := io.ReadAll(reader)
-			reader.Close()
-			if err != nil {
-				log.Printf("[ERROR] Error al leer archivo descomprimido %s: %v", safeFilename, err)
-				return err
-			}
-
-			// Guardar el archivo sin la extensión .gz
-			filePath := filepath.Join(userStorageDir, safeFilename[:len(safeFilename)-3])
-			err = os.WriteFile(filePath, decompressedBuffer, 0644)
-			if err != nil {
-				log.Printf("[ERROR] Error al guardar archivo %s: %v", safeFilename, err)
-				return err
-			}
-
-			elapsed := time.Since(startTime)
-			fileSize := len(decompressedBuffer)
-			log.Printf("[SUCCESS] (%s) %s recibido (%d KB) y guardado en %.2f s", time.Now().Format("15:04:05"), safeFilename, fileSize/1024, elapsed.Seconds())
-			return stream.SendAndClose(&pb.UploadResponse{
-				Message: "Archivo subido y descomprimido con éxito",
-			})
+			break
 		}
-
 		if err != nil {
 			log.Printf("[ERROR] Error al recibir fragmento: %v", err)
 			return err
@@ -171,15 +154,54 @@ func (s *SyncServer) UploadFile(stream pb.SyncService_UploadFileServer) error {
 
 		// Guardar el nombre del archivo (solo una vez)
 		if filename == "" {
-			filename = chunk.Filename
+			filename = filepath.Base(chunk.Filename)
 		}
 
 		// Agregar el fragmento al buffer
-		fileBuffer = append(fileBuffer, chunk.Data...)
+		fileBuffer.Write(chunk.Data)
 	}
+
+	// 5️⃣ Descomprimir el archivo antes de guardarlo
+	reader, err := gzip.NewReader(&fileBuffer)
+	if err != nil {
+		log.Printf("[ERROR] Error al descomprimir archivo %s: %v", filename, err)
+		return err
+	}
+
+	decompressedBuffer, err := io.ReadAll(reader)
+	reader.Close()
+	if err != nil {
+		log.Printf("[ERROR] Error al leer archivo descomprimido %s: %v", filename, err)
+		return err
+	}
+
+	// 6️⃣ Cifrar el archivo antes de guardarlo
+	encryptedData, err := auth.EncryptData(decompressedBuffer, key)
+	if err != nil {
+		log.Printf("[ERROR] Error cifrando archivo %s: %v", filename, err)
+		return err
+	}
+
+	// 7️⃣ Guardar el archivo cifrado
+	filePath := filepath.Join(userStorageDir, filename+".enc")
+	err = os.WriteFile(filePath, encryptedData, 0644)
+	if err != nil {
+		log.Printf("[ERROR] Error al guardar archivo %s: %v", filename, err)
+		return err
+	}
+
+	// 8️⃣ Registrar éxito y responder al cliente
+	elapsed := time.Since(startTime)
+	fileSize := len(decompressedBuffer)
+	log.Printf("[SUCCESS] (%s) %s recibido (%d KB), descomprimido, cifrado y guardado en %.2f s", time.Now().Format("15:04:05"), filename, fileSize/1024, elapsed.Seconds())
+
+	return stream.SendAndClose(&pb.UploadResponse{
+		Message: "Archivo subido, descomprimido y cifrado con éxito",
+	})
 }
 
 func (s *SyncServer) DownloadFile(req *pb.FileRequest, stream pb.SyncService_DownloadFileServer) error {
+	// 1️⃣ Autenticar usuario y obtener su username
 	username, err := getUsernameFromContext(stream.Context())
 	if err != nil {
 		return err
@@ -188,30 +210,47 @@ func (s *SyncServer) DownloadFile(req *pb.FileRequest, stream pb.SyncService_Dow
 	if err := authenticate(stream.Context()); err != nil {
 		return err
 	}
+
+	// 2️⃣ Obtener la clave de cifrado del usuario
+	key, err := auth.GetAESKey(username)
+	if err != nil {
+		return status.Errorf(codes.Internal, "Error obteniendo clave de cifrado")
+	}
+
+	// 3️⃣ Construir la ruta del archivo cifrado
 	userStorageDir := filepath.Join(storageDir, username)
-	filePath := filepath.Join(userStorageDir, req.Filename)
+	filePath := filepath.Join(userStorageDir, req.Filename+".enc")
+
+	// 4️⃣ Verificar que el archivo cifrado existe
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		return status.Errorf(codes.NotFound, "El archivo no existe o no tienes permiso")
 	}
 
-	file, err := os.Open(filePath)
+	// 5️⃣ Leer el archivo cifrado
+	encryptedData, err := os.ReadFile(filePath)
 	if err != nil {
-		log.Printf("[ERROR] No se pudo abrir el archivo %s: %v", req.Filename, err)
+		log.Printf("[ERROR] No se pudo leer el archivo cifrado %s: %v", req.Filename, err)
 		return err
 	}
-	defer file.Close()
 
-	// Comprimir el archivo en memoria
+	// 6️⃣ Descifrar el archivo antes de enviarlo
+	decryptedData, err := auth.DecryptData(encryptedData, key)
+	if err != nil {
+		log.Printf("[ERROR] No se pudo descifrar el archivo %s: %v", req.Filename, err)
+		return err
+	}
+
+	// 7️⃣ Comprimir el archivo antes de enviarlo
 	var compressedBuffer bytes.Buffer
 	gzipWriter := gzip.NewWriter(&compressedBuffer)
-
-	_, err = io.Copy(gzipWriter, file)
+	_, err = gzipWriter.Write(decryptedData)
 	gzipWriter.Close()
 	if err != nil {
 		log.Printf("[ERROR] No se pudo comprimir el archivo %s: %v", req.Filename, err)
 		return err
 	}
 
+	// 8️⃣ Enviar el archivo en fragmentos al cliente
 	buffer := compressedBuffer.Bytes()
 	chunkSize := 1024
 	for i := 0; i < len(buffer); i += chunkSize {
@@ -230,9 +269,10 @@ func (s *SyncServer) DownloadFile(req *pb.FileRequest, stream pb.SyncService_Dow
 		}
 	}
 
-	log.Printf("[SUCCESS] Archivo %s enviado a %s", req.Filename, username)
+	log.Printf("[SUCCESS] Archivo %s descifrado, comprimido y enviado a %s", req.Filename, username)
 	return nil
 }
+
 
 func (s *SyncServer) DeleteFile(ctx context.Context, req *pb.FileRequest) (*pb.UploadResponse, error) {
 	username, err := getUsernameFromContext(ctx)
@@ -270,11 +310,26 @@ func (s *AuthServer) Login(ctx context.Context, req *pb.LoginRequest) (*pb.Login
 		return nil, status.Errorf(codes.Unauthenticated, "Credenciales incorrectas")
 	}
 
+	// 📌 Verificar si el usuario ya tiene clave AES, si no, crearla
+	if _, err := auth.GetAESKey(req.Username); err != nil {
+		log.Printf("[INFO] Clave de cifrado no encontrada para %s, generando nueva...", req.Username)
+		_, err := auth.GenerateAESKey(req.Username)
+		if err != nil {
+			log.Printf("[ERROR] No se pudo generar clave AES para %s: %v", req.Username, err)
+			return nil, status.Errorf(codes.Internal, "Error generando clave de cifrado")
+		}
+		log.Printf("[SUCCESS] Clave AES generada para %s", req.Username)
+	} else {
+		log.Printf("[INFO] Clave AES ya existe para %s", req.Username)
+	}
+
+	// Generar token de acceso
 	accessToken, err := auth.GenerateToken(req.Username)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Error generando el token")
 	}
 
+	// Generar refresh token
 	refreshToken, err := auth.GenerateRefreshToken(req.Username)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Error generando el refresh token")
@@ -282,6 +337,7 @@ func (s *AuthServer) Login(ctx context.Context, req *pb.LoginRequest) (*pb.Login
 
 	return &pb.LoginResponse{Token: accessToken, RefreshToken: refreshToken}, nil
 }
+
 
 func (s *AuthServer) RefreshToken(ctx context.Context, req *pb.RefreshRequest) (*pb.LoginResponse, error) {
 	token, _, err := auth.ValidateToken(req.RefreshToken)
@@ -359,7 +415,6 @@ func getUsernameFromContext(ctx context.Context) (string, error) {
 
 	return username, nil
 }
-
 
 func main() {
 
