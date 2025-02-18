@@ -91,9 +91,14 @@ func (s *SyncServer) watchServerDirectory() {
 }
 
 func (s *SyncServer) ListFiles(ctx context.Context, req *pb.Empty) (*pb.FileList, error) {
-	files, err := os.ReadDir(storageDir)
+	username, err := getUsernameFromContext(ctx)
 	if err != nil {
-		log.Printf("Error al leer el directorio de almacenamiento: %v", err)
+		return nil, err
+	}
+	userStorageDir := filepath.Join(storageDir, username)
+	files, err := os.ReadDir(userStorageDir)
+	if err != nil {
+		log.Printf("[ERROR] No se pudo leer el directorio de %s: %v", username, err)
 		return nil, err
 	}
 
@@ -108,12 +113,18 @@ func (s *SyncServer) ListFiles(ctx context.Context, req *pb.Empty) (*pb.FileList
 }
 
 func (s *SyncServer) UploadFile(stream pb.SyncService_UploadFileServer) error {
-	if err := authenticate(stream.Context()); err != nil {
+	username, err := getUsernameFromContext(stream.Context())
+	if err != nil {
 		return err
 	}
-	startTime := time.Now()
 
-	log.Println("[INFO] Cliente inició la subida de un archivo comprimido.")
+	userStorageDir := filepath.Join(storageDir, username)
+	if _, err := os.Stat(userStorageDir); os.IsNotExist(err) {
+		os.Mkdir(userStorageDir, os.ModePerm)
+	}
+
+	startTime := time.Now()
+	log.Printf("[INFO] (%s) %s está subiendo un archivo", time.Now().Format("15:04:05"), username)
 
 	var filename string
 	fileBuffer := []byte{}
@@ -138,7 +149,7 @@ func (s *SyncServer) UploadFile(stream pb.SyncService_UploadFileServer) error {
 			}
 
 			// Guardar el archivo sin la extensión .gz
-			filePath := filepath.Join(storageDir, safeFilename[:len(safeFilename)-3])
+			filePath := filepath.Join(userStorageDir, safeFilename[:len(safeFilename)-3])
 			err = os.WriteFile(filePath, decompressedBuffer, 0644)
 			if err != nil {
 				log.Printf("[ERROR] Error al guardar archivo %s: %v", safeFilename, err)
@@ -169,11 +180,19 @@ func (s *SyncServer) UploadFile(stream pb.SyncService_UploadFileServer) error {
 }
 
 func (s *SyncServer) DownloadFile(req *pb.FileRequest, stream pb.SyncService_DownloadFileServer) error {
+	username, err := getUsernameFromContext(stream.Context())
+	if err != nil {
+		return err
+	}
+
 	if err := authenticate(stream.Context()); err != nil {
 		return err
 	}
-	startTime := time.Now()
-	filePath := filepath.Join(storageDir, req.Filename)
+	userStorageDir := filepath.Join(storageDir, username)
+	filePath := filepath.Join(userStorageDir, req.Filename)
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return status.Errorf(codes.NotFound, "El archivo no existe o no tienes permiso")
+	}
 
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -211,18 +230,21 @@ func (s *SyncServer) DownloadFile(req *pb.FileRequest, stream pb.SyncService_Dow
 		}
 	}
 
-	elapsed := time.Since(startTime)
-	log.Printf("[SUCCESS] Archivo %s comprimido y enviado en %v", req.Filename, elapsed)
+	log.Printf("[SUCCESS] Archivo %s enviado a %s", req.Filename, username)
 	return nil
 }
 
 func (s *SyncServer) DeleteFile(ctx context.Context, req *pb.FileRequest) (*pb.UploadResponse, error) {
+	username, err := getUsernameFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if err := authenticate(ctx); err != nil {
 		return nil, err
 	}
 
-	startTime := time.Now()
-	filePath := filepath.Join(storageDir, req.Filename)
+	userStorageDir := filepath.Join(storageDir, username)
+	filePath := filepath.Join(userStorageDir, req.Filename)
 
 	// Verificar si el archivo existe
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -231,14 +253,13 @@ func (s *SyncServer) DeleteFile(ctx context.Context, req *pb.FileRequest) (*pb.U
 	}
 
 	// Eliminar el archivo
-	err := os.Remove(filePath)
+	err = os.Remove(filePath)
 	if err != nil {
 		log.Printf("[ERROR] No se pudo eliminar %s: %v", req.Filename, err)
 		return nil, status.Errorf(codes.Internal, "Error al eliminar %s", req.Filename)
 	}
 
-	elapsed := time.Since(startTime)
-	log.Printf("[SUCCESS] (%s) Archivo %s eliminado en %.2f s", time.Now().Format("15:04:05"), req.Filename, elapsed.Seconds())
+	log.Printf("[SUCCESS] Archivo %s eliminado por %s", req.Filename, username)
 
 	return &pb.UploadResponse{Message: "Archivo eliminado correctamente"}, nil
 }
@@ -263,7 +284,7 @@ func (s *AuthServer) Login(ctx context.Context, req *pb.LoginRequest) (*pb.Login
 }
 
 func (s *AuthServer) RefreshToken(ctx context.Context, req *pb.RefreshRequest) (*pb.LoginResponse, error) {
-	token, err := auth.ValidateToken(req.RefreshToken)
+	token, _, err := auth.ValidateToken(req.RefreshToken)
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "Refresh token inválido o expirado")
 	}
@@ -293,7 +314,6 @@ func (s *AuthServer) RefreshToken(ctx context.Context, req *pb.RefreshRequest) (
 	return &pb.LoginResponse{Token: accessToken, RefreshToken: newRefreshToken}, nil
 }
 
-
 func authenticate(ctx context.Context) error {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
@@ -306,13 +326,40 @@ func authenticate(ctx context.Context) error {
 	}
 
 	token := tokens[0]
-	_, err := auth.ValidateToken(token)
+	_, _, err := auth.ValidateToken(token)
 	if err != nil {
 		return status.Errorf(codes.Unauthenticated, "Token inválido")
 	}
 
 	return nil
 }
+
+// Obtener el nombre de usuario desde el contexto gRPC
+func getUsernameFromContext(ctx context.Context) (string, error) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return "", status.Errorf(codes.Unauthenticated, "Falta token de autenticación")
+	}
+
+	tokens := md["authorization"]
+	if len(tokens) == 0 {
+		return "", status.Errorf(codes.Unauthenticated, "Token no encontrado")
+	}
+
+	token := tokens[0]
+	_, claims, err := auth.ValidateToken(token)
+	if err != nil {
+		return "", status.Errorf(codes.Unauthenticated, "Token inválido")
+	}
+
+	username, ok := claims["username"].(string)
+	if !ok {
+		return "", status.Errorf(codes.Unauthenticated, "El token no contiene un username válido")
+	}
+
+	return username, nil
+}
+
 
 func main() {
 

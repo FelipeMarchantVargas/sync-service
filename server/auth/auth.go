@@ -32,7 +32,7 @@ func GenerateRefreshToken(username string) (string, error) {
 
 
 // Validar un token JWT y verificar expiración
-func ValidateToken(tokenString string) (*jwt.Token, error) {
+func ValidateToken(tokenString string) (*jwt.Token, jwt.MapClaims, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, jwt.ErrSignatureInvalid
@@ -41,20 +41,15 @@ func ValidateToken(tokenString string) (*jwt.Token, error) {
 	})
 
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	// Verificar que el token es válido y no ha expirado
-	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-		exp, ok := claims["exp"].(float64)
-		if !ok {
-			return nil, errors.New("token sin fecha de expiración")
-		}
-		if time.Now().Unix() > int64(exp) {
-			return nil, errors.New("token expirado")
-		}
-		return token, nil
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok || !token.Valid {
+		return nil, nil, errors.New("token inválido")
 	}
 
-	return nil, errors.New("token inválido")
+	// Retornar token y claims correctamente
+	return token, claims, nil
 }
+
