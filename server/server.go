@@ -5,7 +5,6 @@ import (
 	"compress/gzip"
 	"context"
 	"io"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 	"github.com/FelipeMarchantVargas/sync-service/server/auth"
 	"github.com/fsnotify/fsnotify"
 	"github.com/golang-jwt/jwt"
+	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -31,6 +31,140 @@ type SyncServer struct {
 type AuthServer struct {
 	pb.UnimplementedAuthServiceServer
 }
+
+// Configurar logrus con archivo de logs
+var log = logrus.New()
+
+func init() {
+	file, err := os.OpenFile("server.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("No se pudo abrir el archivo de logs: %v", err)
+	}
+	log.Out = file
+	log.SetFormatter(&logrus.JSONFormatter{}) // Formato JSON para logs estructurados
+}
+
+// ------------------- AUTENTICACIÓN --------------------
+
+func authenticate(ctx context.Context) error {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		log.Error("Falta token de autenticación")
+		return status.Errorf(codes.Unauthenticated, "Falta token de autenticación")
+	}
+	tokens := md["authorization"]
+	if len(tokens) == 0 {
+		log.Error("Token no encontrado en la metadata")
+		return status.Errorf(codes.Unauthenticated, "Token no encontrado")
+	}
+
+	token := tokens[0]
+	_, _, err := auth.ValidateToken(token)
+	if err != nil {
+		log.WithError(err).Error("Token inválido")
+		return status.Errorf(codes.Unauthenticated, "Token inválido")
+	}
+
+	log.Info("Autenticación exitosa")
+	return nil
+}
+
+// Obtener el nombre de usuario desde el contexto gRPC
+func getUsernameFromContext(ctx context.Context) (string, error) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		log.Error("No se encontró metadata en el contexto")
+		return "", status.Errorf(codes.Unauthenticated, "Falta token de autenticación")
+	}
+	tokens := md["authorization"]
+	if len(tokens) == 0 {
+		log.Error("Token de autenticación ausente")
+		return "", status.Errorf(codes.Unauthenticated, "Token no encontrado")
+	}
+
+	token := tokens[0]
+	_, claims, err := auth.ValidateToken(token)
+	if err != nil {
+		log.WithError(err).Error("Error al validar token")
+		return "", status.Errorf(codes.Unauthenticated, "Token inválido")
+	}
+
+	username, ok := claims["username"].(string)
+	if !ok {
+		log.Error("El token no contiene un username válido")
+		return "", status.Errorf(codes.Unauthenticated, "El token no contiene un username válido")
+	}
+
+	log.WithField("user", username).Info("Username obtenido del token")
+	return username, nil
+}
+
+func (s *AuthServer) Login(ctx context.Context, req *pb.LoginRequest) (*pb.LoginResponse, error) {
+	// ⚠️ En producción, valida con una base de datos
+	if req.Username != "admin" || req.Password != "password" {
+		return nil, status.Errorf(codes.Unauthenticated, "Credenciales incorrectas")
+	}
+
+	// 📌 Verificar si el usuario ya tiene clave AES, si no, crearla
+	if _, err := auth.GetAESKey(req.Username); err != nil {
+		log.Printf("[INFO] Clave de cifrado no encontrada para %s, generando nueva...", req.Username)
+		_, err := auth.GenerateAESKey(req.Username)
+		if err != nil {
+			log.Printf("[ERROR] No se pudo generar clave AES para %s: %v", req.Username, err)
+			return nil, status.Errorf(codes.Internal, "Error generando clave de cifrado")
+		}
+		log.Printf("[SUCCESS] Clave AES generada para %s", req.Username)
+	} else {
+		log.Printf("[INFO] Clave AES ya existe para %s", req.Username)
+	}
+
+	// Generar token de acceso
+	accessToken, err := auth.GenerateToken(req.Username)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "Error generando el token")
+	}
+
+	// Generar refresh token
+	refreshToken, err := auth.GenerateRefreshToken(req.Username)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "Error generando el refresh token")
+	}
+
+	return &pb.LoginResponse{Token: accessToken, RefreshToken: refreshToken}, nil
+}
+
+func (s *AuthServer) RefreshToken(ctx context.Context, req *pb.RefreshRequest) (*pb.LoginResponse, error) {
+	token, _, err := auth.ValidateToken(req.RefreshToken)
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "Refresh token inválido o expirado")
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, status.Errorf(codes.Unauthenticated, "Error en claims")
+	}
+
+	username, ok := claims["username"].(string)
+	if !ok {
+		return nil, status.Errorf(codes.Unauthenticated, "Error obteniendo username")
+	}
+
+	// Generar nuevo Access Token
+	accessToken, err := auth.GenerateToken(username)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "Error generando el token")
+	}
+
+	// Generar un nuevo Refresh Token
+	newRefreshToken, err := auth.GenerateRefreshToken(username)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "Error generando el refresh token")
+	}
+
+	return &pb.LoginResponse{Token: accessToken, RefreshToken: newRefreshToken}, nil
+}
+
+// ------------------------ GESTIÓN DE ARCHIVOS ------------------------
 
 func (s *SyncServer) SyncUpdates(req *pb.Empty, stream pb.SyncService_SyncUpdatesServer) error {
 	s.updateClients = append(s.updateClients, stream)
@@ -116,8 +250,12 @@ func (s *SyncServer) UploadFile(stream pb.SyncService_UploadFileServer) error {
 	// 1️⃣ Autenticar usuario y obtener su username
 	username, err := getUsernameFromContext(stream.Context())
 	if err != nil {
+		log.WithError(err).Error("Error obteniendo username desde contexto")
 		return err
 	}
+	log.WithFields(logrus.Fields{
+		"user": username,
+	}).Info("Inicio de subida de archivo")
 
 	if err := authenticate(stream.Context()); err != nil {
 		return err
@@ -273,7 +411,6 @@ func (s *SyncServer) DownloadFile(req *pb.FileRequest, stream pb.SyncService_Dow
 	return nil
 }
 
-
 func (s *SyncServer) DeleteFile(ctx context.Context, req *pb.FileRequest) (*pb.UploadResponse, error) {
 	username, err := getUsernameFromContext(ctx)
 	if err != nil {
@@ -304,117 +441,7 @@ func (s *SyncServer) DeleteFile(ctx context.Context, req *pb.FileRequest) (*pb.U
 	return &pb.UploadResponse{Message: "Archivo eliminado correctamente"}, nil
 }
 
-func (s *AuthServer) Login(ctx context.Context, req *pb.LoginRequest) (*pb.LoginResponse, error) {
-	// ⚠️ En producción, valida con una base de datos
-	if req.Username != "admin" || req.Password != "password" {
-		return nil, status.Errorf(codes.Unauthenticated, "Credenciales incorrectas")
-	}
-
-	// 📌 Verificar si el usuario ya tiene clave AES, si no, crearla
-	if _, err := auth.GetAESKey(req.Username); err != nil {
-		log.Printf("[INFO] Clave de cifrado no encontrada para %s, generando nueva...", req.Username)
-		_, err := auth.GenerateAESKey(req.Username)
-		if err != nil {
-			log.Printf("[ERROR] No se pudo generar clave AES para %s: %v", req.Username, err)
-			return nil, status.Errorf(codes.Internal, "Error generando clave de cifrado")
-		}
-		log.Printf("[SUCCESS] Clave AES generada para %s", req.Username)
-	} else {
-		log.Printf("[INFO] Clave AES ya existe para %s", req.Username)
-	}
-
-	// Generar token de acceso
-	accessToken, err := auth.GenerateToken(req.Username)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "Error generando el token")
-	}
-
-	// Generar refresh token
-	refreshToken, err := auth.GenerateRefreshToken(req.Username)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "Error generando el refresh token")
-	}
-
-	return &pb.LoginResponse{Token: accessToken, RefreshToken: refreshToken}, nil
-}
-
-
-func (s *AuthServer) RefreshToken(ctx context.Context, req *pb.RefreshRequest) (*pb.LoginResponse, error) {
-	token, _, err := auth.ValidateToken(req.RefreshToken)
-	if err != nil {
-		return nil, status.Errorf(codes.Unauthenticated, "Refresh token inválido o expirado")
-	}
-
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		return nil, status.Errorf(codes.Unauthenticated, "Error en claims")
-	}
-
-	username, ok := claims["username"].(string)
-	if !ok {
-		return nil, status.Errorf(codes.Unauthenticated, "Error obteniendo username")
-	}
-
-	// Generar nuevo Access Token
-	accessToken, err := auth.GenerateToken(username)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "Error generando el token")
-	}
-
-	// Generar un nuevo Refresh Token
-	newRefreshToken, err := auth.GenerateRefreshToken(username)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "Error generando el refresh token")
-	}
-
-	return &pb.LoginResponse{Token: accessToken, RefreshToken: newRefreshToken}, nil
-}
-
-func authenticate(ctx context.Context) error {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return status.Errorf(codes.Unauthenticated, "Falta token de autenticación")
-	}
-
-	tokens := md["authorization"]
-	if len(tokens) == 0 {
-		return status.Errorf(codes.Unauthenticated, "Token no encontrado")
-	}
-
-	token := tokens[0]
-	_, _, err := auth.ValidateToken(token)
-	if err != nil {
-		return status.Errorf(codes.Unauthenticated, "Token inválido")
-	}
-
-	return nil
-}
-
-// Obtener el nombre de usuario desde el contexto gRPC
-func getUsernameFromContext(ctx context.Context) (string, error) {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return "", status.Errorf(codes.Unauthenticated, "Falta token de autenticación")
-	}
-
-	tokens := md["authorization"]
-	if len(tokens) == 0 {
-		return "", status.Errorf(codes.Unauthenticated, "Token no encontrado")
-	}
-
-	token := tokens[0]
-	_, claims, err := auth.ValidateToken(token)
-	if err != nil {
-		return "", status.Errorf(codes.Unauthenticated, "Token inválido")
-	}
-
-	username, ok := claims["username"].(string)
-	if !ok {
-		return "", status.Errorf(codes.Unauthenticated, "El token no contiene un username válido")
-	}
-
-	return username, nil
-}
+// ------------------------ INICIO DEL SERVIDOR ------------------------
 
 func main() {
 

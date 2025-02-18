@@ -6,13 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/sirupsen/logrus"
 
 	pb "github.com/FelipeMarchantVargas/sync-service/proto"
 	"google.golang.org/grpc"
@@ -23,6 +24,18 @@ import (
 type Credentials struct {
 	Token        string `json:"token"`
 	RefreshToken string `json:"refresh_token"`
+}
+
+// Configurar logrus con archivo de logs
+var log = logrus.New()
+
+func init() {
+	file, err := os.OpenFile("client.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("No se pudo abrir el archivo de logs: %v", err)
+	}
+	log.Out = file
+	log.SetFormatter(&logrus.JSONFormatter{}) // Logs en JSON
 }
 
 // Guardar credenciales en un archivo JSON
@@ -107,6 +120,10 @@ func uploadFile(client pb.SyncServiceClient, filePath string, ctx context.Contex
 	
 	// Extraer solo el nombre base del archivo
 	filename := filepath.Base(filePath)
+
+	log.WithFields(logrus.Fields{
+		"file": filename,
+	}).Info("Iniciando subida de archivo")
 
 	// Obtener tamaño del archivo
 	fileInfo, err := os.Stat(filePath)
@@ -308,6 +325,20 @@ func listenForUpdates(client pb.SyncServiceClient, ctx context.Context) {
 			downloadFile(client, update.Filename, ctx)
 		}
 	}
+}
+
+func retryUpload(client pb.SyncServiceClient, filePath string, ctx context.Context, retries int) error {
+	for i := 1; i <= retries; i++ {
+		uploadFile(client, filePath, ctx)
+
+		log.WithFields(logrus.Fields{
+			"file":   filePath,
+			"attempt": i,
+		}).Warn("Intento fallido de subida, reintentando...")
+
+		time.Sleep(time.Duration(i*2) * time.Second) // Espera exponencial
+	}
+	return fmt.Errorf("fallaron todos los intentos de subida")
 }
 
 func main() {
