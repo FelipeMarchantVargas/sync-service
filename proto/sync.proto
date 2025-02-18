@@ -7,6 +7,7 @@ option go_package = "proto/";
 // Servicio de autenticación
 service AuthService {
     rpc Login(LoginRequest) returns (LoginResponse);
+    rpc RefreshToken(RefreshRequest) returns (LoginResponse);
 }
 
 // Servicio de sincronización de archivos
@@ -26,6 +27,11 @@ message LoginRequest {
 
 message LoginResponse {
     string token = 1;
+    string refreshToken = 2;
+}
+
+message RefreshRequest {
+    string refreshToken = 1;
 }
 
 // Estructuras para transferencia de archivos

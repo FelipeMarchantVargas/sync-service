@@ -39,6 +39,7 @@ go mod tidy
 ```
 ├── client/       # Código fuente del cliente
 ├── server/       # Código fuente del servidor
+|   ├── auth/     # Código para la gestión de autenticación
 ├── proto/        # Archivos .proto para la definición de los servicios gRPC
 ├── go.mod        # Archivo de gestión de dependencias de Go
 ├── go.sum        # Checksum de dependencias

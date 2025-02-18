@@ -14,6 +14,7 @@ import (
 	pb "github.com/FelipeMarchantVargas/sync-service/proto"
 	"github.com/FelipeMarchantVargas/sync-service/server/auth"
 	"github.com/fsnotify/fsnotify"
+	"github.com/golang-jwt/jwt"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -248,13 +249,50 @@ func (s *AuthServer) Login(ctx context.Context, req *pb.LoginRequest) (*pb.Login
 		return nil, status.Errorf(codes.Unauthenticated, "Credenciales incorrectas")
 	}
 
-	token, err := auth.GenerateToken(req.Username)
+	accessToken, err := auth.GenerateToken(req.Username)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Error generando el token")
 	}
 
-	return &pb.LoginResponse{Token: token}, nil
+	refreshToken, err := auth.GenerateRefreshToken(req.Username)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "Error generando el refresh token")
+	}
+
+	return &pb.LoginResponse{Token: accessToken, RefreshToken: refreshToken}, nil
 }
+
+func (s *AuthServer) RefreshToken(ctx context.Context, req *pb.RefreshRequest) (*pb.LoginResponse, error) {
+	token, err := auth.ValidateToken(req.RefreshToken)
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "Refresh token inválido o expirado")
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, status.Errorf(codes.Unauthenticated, "Error en claims")
+	}
+
+	username, ok := claims["username"].(string)
+	if !ok {
+		return nil, status.Errorf(codes.Unauthenticated, "Error obteniendo username")
+	}
+
+	// Generar nuevo Access Token
+	accessToken, err := auth.GenerateToken(username)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "Error generando el token")
+	}
+
+	// Generar un nuevo Refresh Token
+	newRefreshToken, err := auth.GenerateRefreshToken(username)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "Error generando el refresh token")
+	}
+
+	return &pb.LoginResponse{Token: accessToken, RefreshToken: newRefreshToken}, nil
+}
+
 
 func authenticate(ctx context.Context) error {
 	md, ok := metadata.FromIncomingContext(ctx)
