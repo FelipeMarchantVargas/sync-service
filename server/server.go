@@ -267,7 +267,7 @@ func (s *SyncServer) UploadFile(stream pb.SyncService_UploadFileServer) error {
 		return status.Errorf(codes.Internal, "Error obteniendo clave de cifrado")
 	}
 
-	// 3️⃣ Verificar si el directorio del usuario existe, si no, crearlo
+	// 3️⃣ Crear directorio del usuario si no existe
 	userStorageDir := filepath.Join(storageDir, username)
 	if _, err := os.Stat(userStorageDir); os.IsNotExist(err) {
 		os.Mkdir(userStorageDir, os.ModePerm)
@@ -299,7 +299,7 @@ func (s *SyncServer) UploadFile(stream pb.SyncService_UploadFileServer) error {
 		fileBuffer.Write(chunk.Data)
 	}
 
-	// 5️⃣ Descomprimir el archivo antes de guardarlo
+	// 5️⃣ Descomprimir el archivo antes de cifrarlo
 	reader, err := gzip.NewReader(&fileBuffer)
 	if err != nil {
 		log.Printf("[ERROR] Error al descomprimir archivo %s: %v", filename, err)
@@ -320,7 +320,7 @@ func (s *SyncServer) UploadFile(stream pb.SyncService_UploadFileServer) error {
 		return err
 	}
 
-	// 7️⃣ Guardar el archivo cifrado
+	// 7️⃣ Guardar el archivo cifrado (eliminando .gz si el cliente lo envió con esa extensión)
 	filePath := filepath.Join(userStorageDir, filename+".enc")
 	err = os.WriteFile(filePath, encryptedData, 0644)
 	if err != nil {
@@ -337,6 +337,7 @@ func (s *SyncServer) UploadFile(stream pb.SyncService_UploadFileServer) error {
 		Message: "Archivo subido, descomprimido y cifrado con éxito",
 	})
 }
+
 
 func (s *SyncServer) DownloadFile(req *pb.FileRequest, stream pb.SyncService_DownloadFileServer) error {
 	// 1️⃣ Autenticar usuario y obtener su username
@@ -357,7 +358,7 @@ func (s *SyncServer) DownloadFile(req *pb.FileRequest, stream pb.SyncService_Dow
 
 	// 3️⃣ Construir la ruta del archivo cifrado
 	userStorageDir := filepath.Join(storageDir, username)
-	filePath := filepath.Join(userStorageDir, req.Filename+".enc")
+	filePath := filepath.Join(userStorageDir, req.Filename+".enc") // 📌 Se asegura de agregar ".enc"
 
 	// 4️⃣ Verificar que el archivo cifrado existe
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -388,7 +389,7 @@ func (s *SyncServer) DownloadFile(req *pb.FileRequest, stream pb.SyncService_Dow
 		return err
 	}
 
-	// 8️⃣ Enviar el archivo en fragmentos al cliente
+	// 8️⃣ Enviar el archivo en fragmentos al cliente con su nombre original
 	buffer := compressedBuffer.Bytes()
 	chunkSize := 1024
 	for i := 0; i < len(buffer); i += chunkSize {
@@ -398,7 +399,7 @@ func (s *SyncServer) DownloadFile(req *pb.FileRequest, stream pb.SyncService_Dow
 		}
 
 		err := stream.Send(&pb.FileChunk{
-			Filename: req.Filename + ".gz",
+			Filename: req.Filename, // 📌 Enviar el nombre sin `.gz`
 			Data:     buffer[i:end],
 		})
 		if err != nil {
@@ -421,7 +422,7 @@ func (s *SyncServer) DeleteFile(ctx context.Context, req *pb.FileRequest) (*pb.U
 	}
 
 	userStorageDir := filepath.Join(storageDir, username)
-	filePath := filepath.Join(userStorageDir, req.Filename)
+	filePath := filepath.Join(userStorageDir, req.Filename+".enc") // 📌 Se asegura de agregar ".enc"
 
 	// Verificar si el archivo existe
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {

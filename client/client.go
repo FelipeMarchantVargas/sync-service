@@ -5,7 +5,6 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -14,8 +13,10 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/sirupsen/logrus"
+	"github.com/urfave/cli"
 
 	pb "github.com/FelipeMarchantVargas/sync-service/proto"
+	"github.com/FelipeMarchantVargas/sync-service/server/auth"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 )
@@ -37,6 +38,8 @@ func init() {
 	log.Out = file
 	log.SetFormatter(&logrus.JSONFormatter{}) // Logs en JSON
 }
+
+// -------------------- AUTENTICACIÓN ---------------------------
 
 // Guardar credenciales en un archivo JSON
 func saveCredentials(creds Credentials) error {
@@ -115,9 +118,11 @@ func getAuthContext(authClient pb.AuthServiceClient) (context.Context, error) {
 	return ctx, nil
 }
 
-func uploadFile(client pb.SyncServiceClient, filePath string, ctx context.Context) {
+// ------------------------- SINCRONIZACIÓN --------------------------------
+
+func uploadFile(client pb.SyncServiceClient, filePath string, ctx context.Context) error {
 	startTime := time.Now()
-	
+
 	// Extraer solo el nombre base del archivo
 	filename := filepath.Base(filePath)
 
@@ -131,9 +136,9 @@ func uploadFile(client pb.SyncServiceClient, filePath string, ctx context.Contex
 		log.Fatalf("[ERROR] No se pudo obtener info del archivo: %v", err)
 	}
 	fileSize := fileInfo.Size()
-	
+
 	log.Printf("[INFO] (%s) Subiendo %s (%d KB)", time.Now().Format("15:04:05"), filename, fileSize/1024)
-	
+
 	// Abrir el archivo original
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -166,7 +171,7 @@ func uploadFile(client pb.SyncServiceClient, filePath string, ctx context.Contex
 		}
 
 		err := stream.Send(&pb.FileChunk{
-			Filename: filePath + ".gz",
+			Filename: filename, // 🔥 No agregamos ".gz"
 			Data:     compressedData[i:end],
 		})
 		if err != nil {
@@ -181,9 +186,10 @@ func uploadFile(client pb.SyncServiceClient, filePath string, ctx context.Contex
 	}
 	elapsed := time.Since(startTime)
 	log.Printf("[SUCCESS] (%s) %s subido en %.2f s", time.Now().Format("15:04:05"), filename, elapsed.Seconds())
+	return nil
 }
 
-func downloadFile(client pb.SyncServiceClient, filename string, ctx context.Context) {
+func downloadFile(client pb.SyncServiceClient, filename string, ctx context.Context) error {
 	startTime := time.Now()
 	log.Printf("[INFO] (%s) Descargando %s...", time.Now().Format("15:04:05"), filename)
 
@@ -216,18 +222,77 @@ func downloadFile(client pb.SyncServiceClient, filename string, ctx context.Cont
 		log.Fatalf("[ERROR] Error al leer archivo descomprimido: %v", err)
 	}
 
-	// Guardar el archivo descomprimido
-	filePath := filepath.Join("./", filename)
+	// 🔥 Si el archivo tiene `.gz`, eliminarlo del nombre antes de guardar
+	cleanFilename := filename
+	if filepath.Ext(filename) == ".gz" {
+		cleanFilename = filename[:len(filename)-3]
+	}
+
+	// Guardar el archivo descomprimido con su nombre correcto
+	filePath := filepath.Join("./", cleanFilename)
 	err = os.WriteFile(filePath, decompressedData, 0644)
 	if err != nil {
 		log.Fatalf("[ERROR] No se pudo guardar el archivo: %v", err)
 	}
 
 	elapsed := time.Since(startTime)
-	log.Printf("[SUCCESS] (%s) %s descargado en %.2f s", time.Now().Format("15:04:05"), filename, elapsed.Seconds())
+	log.Printf("[SUCCESS] (%s) %s descargado en %.2f s", time.Now().Format("15:04:05"), cleanFilename, elapsed.Seconds())
+	return nil
 }
 
-func deleteFile(client pb.SyncServiceClient, filePath string, ctx context.Context) {
+func listFiles(client pb.SyncServiceClient, ctx context.Context) error {
+	startTime := time.Now()
+	log.Println("[INFO] Solicitando lista de archivos...")
+
+	resp, err := client.ListFiles(ctx, &pb.Empty{})
+	if err != nil {
+		log.Fatalf("[ERROR] No se pudo obtener la lista de archivos: %v", err)
+		return err
+	}
+
+	if len(resp.Filenames) == 0 {
+		log.Println("[INFO] No hay archivos en el servidor.")
+		return nil
+	}
+
+	// Obtener el nombre de usuario desde el contexto
+	username, err := getUsernameFromContext(ctx)
+	if err != nil {
+		log.Fatalf("[ERROR] No se pudo obtener el nombre de usuario: %v", err)
+		return err
+	}
+
+	// Crear el archivo de salida
+	outputFile := fmt.Sprintf("archivos_%s.txt", username)
+	file, err := os.Create(outputFile)
+	if err != nil {
+		log.Fatalf("[ERROR] No se pudo crear el archivo de lista: %v", err)
+		return err
+	}
+	defer file.Close()
+
+	// Escribir los archivos en el archivo, eliminando la extensión ".enc"
+	file.WriteString("Lista de archivos de " + username + ":\n\n")
+	for _, fileName := range resp.Filenames {
+		cleanName := fileName
+		if filepath.Ext(fileName) == ".enc" {
+			cleanName = fileName[:len(fileName)-4] // Elimina la extensión ".enc"
+		}
+		_, err := file.WriteString(cleanName + "\n")
+		if err != nil {
+			log.Fatalf("[ERROR] No se pudo escribir en el archivo de lista: %v", err)
+			return err
+		}
+	}
+
+	log.Printf("[SUCCESS] Lista de archivos guardada en '%s'", outputFile)
+
+	elapsed := time.Since(startTime)
+	log.Printf("[INFO] Listado completado en %.2f s", elapsed.Seconds())
+	return nil
+}
+
+func deleteFile(client pb.SyncServiceClient, filePath string, ctx context.Context) error {
 	startTime := time.Now()
 
 	// Extraer solo el nombre base del archivo
@@ -238,11 +303,12 @@ func deleteFile(client pb.SyncServiceClient, filePath string, ctx context.Contex
 	_, err := client.DeleteFile(ctx, &pb.FileRequest{Filename: filename})
 	if err != nil {
 		log.Printf("[ERROR] No se pudo eliminar el archivo en el servidor: %v", err)
-		return
+		return err
 	}
 
 	elapsed := time.Since(startTime)
 	log.Printf("[SUCCESS] (%s) Archivo %s eliminado en %.2f s", time.Now().Format("15:04:05"), filename, elapsed.Seconds())
+	return nil
 }
 
 func login(client pb.AuthServiceClient, username, password string) (string, string, error) {
@@ -341,84 +407,137 @@ func retryUpload(client pb.SyncServiceClient, filePath string, ctx context.Conte
 	return fmt.Errorf("fallaron todos los intentos de subida")
 }
 
+func getUsernameFromContext(ctx context.Context) (string, error) {
+	md, ok := metadata.FromOutgoingContext(ctx)
+	if !ok {
+		return "", fmt.Errorf("No se encontraron metadatos de autenticación")
+	}
+
+	tokens := md["authorization"]
+	if len(tokens) == 0 {
+		return "", fmt.Errorf("No se encontró token de autenticación")
+	}
+
+	token := tokens[0]
+	_, claims, err := auth.ValidateToken(token) // Debes asegurarte de tener `ValidateToken` en `auth`
+	if err != nil {
+		return "", fmt.Errorf("Token inválido: %v", err)
+	}
+
+	username, ok := claims["username"].(string)
+	if !ok {
+		return "", fmt.Errorf("No se pudo extraer el nombre de usuario del token")
+	}
+
+	return username, nil
+}
+
+
+// 🛠️ Configurar la CLI
 func main() {
-	// Definir flags CLI
-	uploadCmd := flag.String("upload", "", "Sube un archivo al servidor")
-	downloadCmd := flag.String("download", "", "Descarga un archivo desde el servidor")
-	listCmd := flag.Bool("list", false, "Lista los archivos en el servidor")
-	watchCmd := flag.String("watch", "", "Monitorea un directorio y sincroniza archivos automáticamente")
-	deleteCmd := flag.String("delete", "", "Elimina un archivo del servidor")
-	flag.Parse()
+	app := &cli.App{
+		Name:  "SyncService Client",
+		Usage: "Cliente gRPC para sincronización de archivos",
+		Commands: []cli.Command{
+			{
+				Name:    "upload",
+				Aliases: []string{"u"},
+				Usage:   "Subir un archivo al servidor",
+				Action: func(c *cli.Context) error {
+					if c.NArg() < 1 {
+						return fmt.Errorf("debes proporcionar la ruta del archivo")
+					}
+					filePath := c.Args().First()
+					conn, err := grpc.Dial("localhost:50051", grpc.WithInsecure())
+					if err != nil {
+						return err
+					}
+					defer conn.Close()
 
-	// Conectar al servidor gRPC
-	startTime := time.Now()
-	conn, err := grpc.Dial("localhost:50051", grpc.WithInsecure())
+					syncClient := pb.NewSyncServiceClient(conn)
+					authClient := pb.NewAuthServiceClient(conn)
+					ctx, err := getAuthContext(authClient)
+					if err != nil {
+						return err
+					}
+
+					return uploadFile(syncClient, filePath, ctx)
+				},
+			},
+			{
+				Name:    "download",
+				Aliases: []string{"d"},
+				Usage:   "Descargar un archivo del servidor",
+				Action: func(c *cli.Context) error {
+					if c.NArg() < 1 {
+						return fmt.Errorf("debes proporcionar el nombre del archivo")
+					}
+					filename := c.Args().First()
+					conn, err := grpc.Dial("localhost:50051", grpc.WithInsecure())
+					if err != nil {
+						return err
+					}
+					defer conn.Close()
+
+					syncClient := pb.NewSyncServiceClient(conn)
+					authClient := pb.NewAuthServiceClient(conn)
+					ctx, err := getAuthContext(authClient)
+					if err != nil {
+						return err
+					}
+
+					return downloadFile(syncClient, filename, ctx)
+				},
+			},{
+				Name:    "list",
+				Aliases: []string{"l"},
+				Usage:   "Listar los archivos del servidor",
+				Action: func(c *cli.Context) error {
+					conn, err := grpc.Dial("localhost:50051", grpc.WithInsecure())
+					if err != nil {
+						return err
+					}
+					defer conn.Close()
+
+					syncClient := pb.NewSyncServiceClient(conn)
+					authClient := pb.NewAuthServiceClient(conn)
+					ctx, err := getAuthContext(authClient)
+					if err != nil {
+						return err
+					}
+					
+					return listFiles(syncClient, ctx)
+				},
+			},{
+				Name:    "delete",
+				Aliases: []string{"del"},
+				Usage:   "Eliminar un archivo del servidor",
+				Action: func(c *cli.Context) error {
+					if c.NArg() < 1 {
+						return fmt.Errorf("debes proporcionar el nombre del archivo")
+					}
+					filename := c.Args().First()
+					conn, err := grpc.Dial("localhost:50051", grpc.WithInsecure())
+					if err != nil {
+						return err
+					}
+					defer conn.Close()
+
+					syncClient := pb.NewSyncServiceClient(conn)
+					authClient := pb.NewAuthServiceClient(conn)
+					ctx, err := getAuthContext(authClient)
+					if err != nil {
+						return err
+					}
+
+					return deleteFile(syncClient, filename, ctx)
+				},
+			},
+		},
+	}
+
+	err := app.Run(os.Args)
 	if err != nil {
-		log.Fatalf("[ERROR] No se pudo conectar: %v", err)
+		log.Fatal(err)
 	}
-	defer conn.Close()
-
-	// crear clientes gRPC
-	authClient := pb.NewAuthServiceClient(conn)
-	syncClient := pb.NewSyncServiceClient(conn)
-
-	// Obtener contexto autenticado con tokens
-	ctx, err := getAuthContext(authClient)
-	if err != nil {
-		log.Fatalf("[ERROR] No se pudo autenticar: %v", err)
-	}
-
-	// Ejecutar acción según el comando ingresado
-	switch {
-	case *uploadCmd != "":
-		if _, err := os.Stat(*uploadCmd); os.IsNotExist(err) {
-			log.Fatalf("[ERROR] El archivo %s no existe", *uploadCmd)
-		}
-		log.Printf("[INFO] Subiendo archivo: %s", *uploadCmd)
-		start := time.Now()
-		uploadFile(syncClient, *uploadCmd, ctx)
-		elapsed := time.Since(start)
-		log.Printf("[SUCCESS] Archivo subido en %v", elapsed)
-
-	case *downloadCmd != "":
-		log.Printf("[INFO] Descargando archivo: %s", *downloadCmd)
-		start := time.Now()
-		downloadFile(syncClient, *downloadCmd, ctx)
-		elapsed := time.Since(start)
-		log.Printf("[SUCCESS] Archivo descargado en %v", elapsed)
-
-	case *deleteCmd != "":
-		log.Printf("[INFO] Eliminando archivo: %s", *deleteCmd)
-		start := time.Now()
-		deleteFile(syncClient, *deleteCmd, ctx)
-		elapsed := time.Since(start)
-		log.Printf("[SUCCESS] Archivo eliminado en %v", elapsed)
-
-	case *listCmd:
-		log.Println("[INFO] Listando archivos en el servidor...")
-
-		resp, err := syncClient.ListFiles(ctx, &pb.Empty{})
-		if err != nil {
-			log.Fatalf("[ERROR] Error en ListFiles: %v", err)
-		}
-		log.Println("[SUCCESS] Archivos en el servidor:", resp.Filenames)
-
-	case *watchCmd != "":
-		log.Println("[INFO] Iniciando sincronización automática en:", *watchCmd)
-
-		go watchDirectory(syncClient, *watchCmd, ctx) // Monitorear cambios locales
-		go listenForUpdates(syncClient, ctx)         // Escuchar cambios remotos
-
-		select {} // Mantener el programa corriendo
-
-	default:
-		log.Println("[INFO] Uso:")
-		log.Println("  - Para subir un archivo:   go run client/client.go --upload nombre_archivo.txt")
-		log.Println("  - Para descargar un archivo: go run client/client.go --download nombre_archivo.txt")
-		log.Println("  - Para listar archivos:    go run client/client.go --list")
-		log.Println("  - Para monitorear un dir:  go run client/client.go --watch carpeta/")
-	}
-
-	totalTime := time.Since(startTime)
-	log.Printf("[INFO] Tiempo total de ejecución: %v", totalTime)
 }
